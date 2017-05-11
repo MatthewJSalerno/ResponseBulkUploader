@@ -86,7 +86,7 @@ my $scanvendor = ucfirst(lc($options{v}));
 # Check auth method
 if (!exists $auth{lc($options{a})}){
         print $help;
-        print "Invalid scan vendor specified: $options{a}\n";
+        print "Invalid auth method specified: $options{a}\n";
         exit;
 }
 
