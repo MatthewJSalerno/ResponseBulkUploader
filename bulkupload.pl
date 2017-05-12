@@ -34,7 +34,6 @@ my $loginurl = 'https:// /dcaportal/api/login';
 my $scanuploadurl = 'https:// /dcaportal/api/vulnerability/importScan';
 my $statuscheckurl = 'https:// /dcaportal/api/bsmsearch/results?taskId=';
 
-my $importsev;
 my @failedtasks;
 
 # Associate scan file extension with scanner
@@ -102,6 +101,7 @@ if (!exists $auth{lc($options{a})}){
 }
 
 # Check severity
+my $importsev;
 if (exists($options{s}) ){
 	my @sevs = split(/,/, $options{s});
 	foreach my $sev (@sevs){
