@@ -4,28 +4,39 @@ use LWP::UserAgent;
 use HTTP::Request::Common qw(POST);
 use File::Basename;
 use Getopt::Std;
+use File::Copy;
 
 ####
-# TODO
 #
-# Check response of uploaded file - Duplicate file check / Invalid parsing
-# Move files to directory based on response
-#
-####
-
-
-# TEMP VARS TO BE CLEANED UP
-$ENV{'PERL_LWP_SSL_VERIFY_HOSTNAME'} = 0;
-my $loginurl = 'https://  /dcaportal/api/login';
-my $scanuploadurl = 'https:// /dcaportal/api/vulnerability/importScan';
-
-my $importsev;
-
 # BMC Software
-# Matthew Salerno
+# Matthew J. Salerno
 # -
 # Bulk Scan File upload
 #
+####
+
+####
+# NOTES
+#
+# I know I shouldn't use regex to parse JSON
+# I'm trying to reduce the module dependencies
+# to keep it portable.
+#
+# Not sure if I should loop on all failed tasks
+# at end of script to re-check their status
+#
+####
+
+# VARS TO BE CLEANED UP
+#$ENV{'PERL_LWP_SSL_VERIFY_HOSTNAME'} = 0;
+
+my $loginurl = 'https:// /dcaportal/api/login';
+my $scanuploadurl = 'https:// /dcaportal/api/vulnerability/importScan';
+my $statuscheckurl = 'https:// /dcaportal/api/bsmsearch/results?taskId=';
+
+my $importsev;
+my @failedtasks;
+
 # Associate scan file extension with scanner
 my %scanengines = (
         "qualys" => "xml",
@@ -78,7 +89,7 @@ foreach (@required){
 # Check scan vendor
 if (!exists $scanengines{lc($options{v})}){
 	print $help;
-	print "Invalid scan vendor specified: $options{v}\n";
+	print "Invalid Scan vendor specified: $options{v}\n";
 	exit;
 }
 my $scanvendor = ucfirst(lc($options{v}));
@@ -86,7 +97,7 @@ my $scanvendor = ucfirst(lc($options{v}));
 # Check auth method
 if (!exists $auth{lc($options{a})}){
         print $help;
-        print "Invalid auth method specified: $options{a}\n";
+        print "Invalid Auth method specified: $options{a}\n";
         exit;
 }
 
@@ -141,25 +152,58 @@ $ua->cookie_jar( {} );
 # Authenticate
 my ($status, $clientid) = login($ua, $loginurl, $loginstr);
 if ($status != 0){
-	print $clientid."\n";
+	print "Authentication Error: $clientid\n";
 	exit 1;
 }
 
 foreach my $file (@scanfiles){
 	my $fullfilepath = $options{d}."/".$file;
-	print "Uploading $fullfilepath\n";
-	my $uploadstatus = uploadscan($ua, $clientid, $scanuploadurl, $fullfilepath,$importsev,$scanvendor);
-	print "Upload Complete: $uploadstatus\n\n";
+	print "$file: Uploading $fullfilepath\n";
+	my ($status,$httpreturn) = uploadscan($ua, $clientid, $scanuploadurl, $fullfilepath,$importsev,$scanvendor);
+	print "$file: Upload Complete: $httpreturn\n";
+	if ($status != 0){
+		print "$file: $httpreturn\n";
+		exit 1;
+	}
+	my ($taskid) = $httpreturn =~ m/.*taskId":"(.*?)".*/g;
+	my ($taskstatus,$taskreturn) = checktask($ua,$clientid,$statuscheckurl,$taskid);
+	$taskreturn =~ s|^|$file: |mg;
+	print $taskreturn."\n";
+
+	my $newfile = $file;
+	if ($taskstatus == 0){
+		if (-f "$options{d}/imported/$file"){
+			my $epoch = time;
+			move($fullfilepath,"$options{d}/imported/$file-$epoch") or warn "$file: Move failed: $!";
+			print "$file: Moved to $options{d}/imported/$file-$epoch\n";
+		}
+		else {
+			move($fullfilepath,"$options{d}/imported/$file") or warn "$file: Move failed: $!";
+			print "$file: Moved to $options{d}/imported/$file\n";
+		}
+	}
+	else {
+		push (@failedtasks, $taskid); # Should we maybe check these one more time before declaring it a failure?
+		if (-f "$options{d}/failed/$file"){
+			my $epoch = time;
+			move($fullfilepath,"$options{d}/failed/$file-$epoch") or warn "$file: Move failed: $!" && next;
+			print "$file: Moved to $options{d}/failed/$file-$epoch\n";
+		}
+		else {
+			move($fullfilepath,"$options{d}/failed/$file") or warn "$file: Move failed: $!" && next;
+			print "$file: Moved to $options{d}/failed/$file\n";
+		}
+	}
 }
-exit;
+exit 0;
 
 sub dircheck {
 	my $scanfiledir = shift;
 	if (!-d $scanfiledir){
 		return (1, "Directory does not exist: $scanfiledir");
 	}
-	if (!-d "$scanfiledir/uploaded"){
-		mkdir "$scanfiledir/uploaded" or return (1, "Cannot create directory: $scanfiledir/uploaded $!\n");
+	if (!-d "$scanfiledir/imported"){
+		mkdir "$scanfiledir/imported" or return (1, "Cannot create directory: $scanfiledir/uploaded $!\n");
 	}
 	if (!-d "$scanfiledir/failed"){
 		mkdir "$scanfiledir/failed" or return (1, "Cannot create directory: $scanfiledir/failed $!\n");
@@ -171,7 +215,7 @@ sub getscans {
 	my $scanfiledir = shift;
 	my $scanext = shift;
 	opendir my $scanfh, $scanfiledir or die "Cannot open directory: $!";
-	my @scans = grep(/\.$scanext$/,readdir($scanfh));
+	my @scans = grep(/\.$scanext$/i,readdir($scanfh));
 	closedir $scanfh;
 	return @scans;
 }
@@ -184,7 +228,6 @@ sub uploadscan {
 	my $importsev = shift;
 	my $scanvendor = shift;
 	my $scanfilename = basename $scanfile;
-
 
 	my $uploadreq = POST $scanuploadurl,
 	[
@@ -204,10 +247,10 @@ sub uploadscan {
 	
 	my $upresponse = $ua->request($uploadreq);
 	if ($upresponse->is_success) {
-		return $upresponse->decoded_content;
+		return (0,$upresponse->decoded_content);
 	}
 	else {
-		return "Error: " . $upresponse->status_line . "\n";
+		return (1,"Error: " . $upresponse->status_line . "\n");
 	}
 }
 
@@ -215,21 +258,46 @@ sub login {
 	my $ua = shift;
 	my $loginurl = shift;
 	my $loginstr = shift;
-	my $req = HTTP::Request->new( POST => $loginurl);
-	$req->content_type('application/json');
-	$req->content($loginstr);
-	my $res = $ua->request($req);
+	my $loginreq = HTTP::Request->new( POST => $loginurl);
+	$loginreq->content_type('application/json');
+	$loginreq->content($loginstr);
+	my $loginres = $ua->request($loginreq);
 
-	if ($res->is_success) {
-		if ($res->decoded_content =~ /BAD_CREDENTIALS_AUTHENTICATION_FAILURE/i){
-			return (1,"BAD_CREDENTIALS_AUTHENTICATION_FAILURE");
+	if ($loginres->is_success) {
+		my ($errorcode) = $loginres->decoded_content =~ m/.*errorCode":"?(.*?)"?,.*/g;
+		if ($errorcode =~ /null/i){
+			($clientid) = $loginres->decoded_content =~ m/.*clientId":"(.*?)".*/g;
+			return (0,$clientid);
 		}
 		else {
-			($clientid) = $res->decoded_content =~ m/.*clientId":"(.*)".*/g;
-			return (0,$clientid);
+			return (1,$errorcode);
 		}
 	}
 	else {
-		return (1,$res->status_line);
+		return (1,$loginres->status_line);
+	}
+}
+
+sub checktask{
+	my $ua = shift;
+	my $clientID = shift;
+	my $statuscheckurl = shift;
+	my $taskid = shift;
+
+	my $taskreq = HTTP::Request->new( GET => $statuscheckurl.$taskid);
+	$taskreq->header(ClientId => $clientid);
+	my $taskres = $ua->request($taskreq);
+
+	my ($errorcode) = $taskres->decoded_content =~ m/.*errorCode":"?(.*?)"?,.*/g;
+
+	if ($errorcode =~ /null/i){
+		return (0, "Status: Import successful");
+	}
+	else {
+		my ($errorcause) = $taskres->decoded_content =~ m/.*errorCause":"(.*?)".*/g;
+		my ($taskprogress) = $taskres->decoded_content =~ m/.*taskProgress":(.*?),.*/g;
+		my ($taskstate) = $taskres->decoded_content =~ m/.*taskState":"(.*?)".*/g;
+		my $returnstat = "Status: $taskstate\nCode: $errorcode\nCause: $errorcause";
+		return (1, $returnstat);
 	}
 }
