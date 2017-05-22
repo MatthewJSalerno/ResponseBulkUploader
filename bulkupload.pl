@@ -6,6 +6,7 @@ use File::Basename;
 use Getopt::Std;
 use File::Copy;
 
+use Data::Dumper;
 ####
 #
 # BMC Software
@@ -28,13 +29,16 @@ use File::Copy;
 ####
 
 # VARS TO BE CLEANED UP
-#$ENV{'PERL_LWP_SSL_VERIFY_HOSTNAME'} = 0;
+$ENV{'PERL_LWP_SSL_VERIFY_HOSTNAME'} = 0;
 
-my $loginurl = 'https:// /dcaportal/api/login';
-my $scanuploadurl = 'https:// /dcaportal/api/vulnerability/importScan';
-my $statuscheckurl = 'https:// /dcaportal/api/bsmsearch/results?taskId=';
+my $loginurl = 'https://secure.secops.bmc.com/dcaportal/api/login';
+my $scanuploadurl = 'https://secure.secops.bmc.com/dcaportal/api/vulnerability/importScan';
+my $statuscheckurl = 'https://secure.secops.bmc.com/dcaportal/api/bsmsearch/results?taskId=';
+
 
 my @failedtasks;
+
+my %runningtasks; # Used for long running tasks
 
 # Associate scan file extension with scanner
 my %scanengines = (
@@ -132,7 +136,7 @@ if ($dirstatus[0] != 0){
 my @scanfiles = getscans($options{d}, $scanengines{lc($scanvendor)});
 
 if (!@scanfiles){
-	print "No scan files locaated at: $options{d}\n";
+	print "No scan files located at: $options{d}\n";
 	exit 0;
 }
 
@@ -150,52 +154,78 @@ my $ua = LWP::UserAgent->new();
 $ua->cookie_jar( {} );
 
 # Authenticate
-my ($status, $clientid) = login($ua, $loginurl, $loginstr);
-if ($status != 0){
-	print "Authentication Error: $clientid\n";
+my ($loginreturn) = login($ua, $loginurl, $loginstr);
+if (exists $$loginreturn{'errormsg'}){
+	print "HTTP Status: $$loginreturn{'HTTPCode'} $$loginreturn{'HTTPMessage'}\n";
+	print "$$loginreturn{'errormsg'}\n";
 	exit 1;
 }
 
 foreach my $file (@scanfiles){
 	my $fullfilepath = $options{d}."/".$file;
 	print "$file: Uploading $fullfilepath\n";
-	my ($status,$httpreturn) = uploadscan($ua, $clientid, $scanuploadurl, $fullfilepath,$importsev,$scanvendor);
-	print "$file: Upload Complete: $httpreturn\n";
-	if ($status != 0){
-		print "$file: $httpreturn\n";
+	my ($uploadreturn) = uploadscan($ua, $$loginreturn{'clientId'}, $scanuploadurl, $fullfilepath,$importsev,$scanvendor);
+
+	if (exists $$uploadreturn{'errormsg'}){
+		print "$file: HTTP Status: $$uploadreturn{'HTTPCode'} $$uploadreturn{'HTTPMessage'}\n";
+		print "$file: $$loginreturn{'errormsg'}\n";
 		exit 1;
 	}
-	my ($taskid) = $httpreturn =~ m/.*taskId":"(.*?)".*/g;
-	my ($taskstatus,$taskreturn) = checktask($ua,$clientid,$statuscheckurl,$taskid);
-	$taskreturn =~ s|^|$file: |mg;
-	print $taskreturn."\n";
 
-	my $newfile = $file;
-	if ($taskstatus == 0){
-		if (-f "$options{d}/imported/$file"){
-			my $epoch = time;
-			move($fullfilepath,"$options{d}/imported/$file-$epoch") or warn "$file: Move failed: $!";
-			print "$file: Moved to $options{d}/imported/$file-$epoch\n";
+	if (exists $$uploadreturn{'taskId'}){
+		sleep 1;
+		my $taskreturn = checktask($ua,$$loginreturn{'clientId'},$statuscheckurl,$$uploadreturn{'taskId'});	
+
+		if ($$taskreturn{'completed'} =~ /false/i && $$taskreturn{'taskProgress'} != 100.0){
+			print "$file: Task still processing - Putting in queue and not moving file for now\n";
+			$runningtasks{$$uploadreturn{'taskId'}} = $file;
+			next;
 		}
-		else {
-			move($fullfilepath,"$options{d}/imported/$file") or warn "$file: Move failed: $!";
-			print "$file: Moved to $options{d}/imported/$file\n";
+		if (exists $$taskreturn{'errormsg'}){
+			$$taskreturn{'errormsg'} =~ s|^|$file: |mg;
+			print "$file: HTTP Status: $$taskreturn{'HTTPCode'} $$taskreturn{'HTTPMessage'}\n";
+			print "$$taskreturn{'errormsg'}\n";
 		}
-	}
-	else {
-		push (@failedtasks, $taskid); # Should we maybe check these one more time before declaring it a failure?
-		if (-f "$options{d}/failed/$file"){
-			my $epoch = time;
-			move($fullfilepath,"$options{d}/failed/$file-$epoch") or warn "$file: Move failed: $!" && next;
-			print "$file: Moved to $options{d}/failed/$file-$epoch\n";
-		}
-		else {
-			move($fullfilepath,"$options{d}/failed/$file") or warn "$file: Move failed: $!" && next;
-			print "$file: Moved to $options{d}/failed/$file\n";
-		}
+		my $movestatus = movefile($file,$options{d},$$taskreturn{'errorCode'});
+		print "$file: $movestatus\n";
 	}
 }
 exit 0;
+
+sub movefile {
+	my $file = shift;
+	my $path = shift;
+	my $errorCode = shift;
+
+	my $fullfilepath = $path."/".$file;
+
+	my $newfile = $file;
+	if ($errorCode =~ /null/i ){
+		if (-f "$path/imported/$file"){
+			my $epoch = time;
+			move($fullfilepath,"$path/imported/$file-$epoch") or return "$file: ERROR: Move failed: $!";
+			return "$file: Moved to $path/imported/$file-$epoch\n";
+		}
+		else {
+			move($fullfilepath,"$path/imported/$file") or return "$file: ERROR: Move failed: $!";
+			return "$file: Moved to $path/imported/$file\n";
+		}
+	}
+	else {
+		#push (@failedtasks, $$uploadreturn{'taskId'}); # Should we maybe check these one more time before declaring it a failure?
+		if (-f "$path/failed/$file"){
+			my $epoch = time;
+			move($fullfilepath,"$options{d}/failed/$file-$epoch") or return "$file: ERROR: Move failed: $!";
+			return "$file: Moved to $path/failed/$file-$epoch\n";
+		}
+		else {
+			move($fullfilepath,"$path/failed/$file") or return "$file: ERROR: Move failed: $!";
+			return "$file: Moved to $path/failed/$file\n";
+		}
+	}
+}
+
+	
 
 sub dircheck {
 	my $scanfiledir = shift;
@@ -245,13 +275,10 @@ sub uploadscan {
 	#my $upresponse = $ua->send_request($uploadreq);
 	#print $upresponse->as_string;
 	
-	my $upresponse = $ua->request($uploadreq);
-	if ($upresponse->is_success) {
-		return (0,$upresponse->decoded_content);
-	}
-	else {
-		return (1,"Error: " . $upresponse->status_line . "\n");
-	}
+	my $uploadres = $ua->request($uploadreq);
+
+	my $uploadreturn = parseOutput($uploadres);
+	return $uploadreturn;
 }
 
 sub login {
@@ -262,20 +289,9 @@ sub login {
 	$loginreq->content_type('application/json');
 	$loginreq->content($loginstr);
 	my $loginres = $ua->request($loginreq);
-
-	if ($loginres->is_success) {
-		my ($errorcode) = $loginres->decoded_content =~ m/.*errorCode":"?(.*?)"?,.*/g;
-		if ($errorcode =~ /null/i){
-			($clientid) = $loginres->decoded_content =~ m/.*clientId":"(.*?)".*/g;
-			return (0,$clientid);
-		}
-		else {
-			return (1,$errorcode);
-		}
-	}
-	else {
-		return (1,$loginres->status_line);
-	}
+	
+	my $httpreturn = parseOutput($loginres);
+	return $httpreturn;
 }
 
 sub checktask{
@@ -285,19 +301,59 @@ sub checktask{
 	my $taskid = shift;
 
 	my $taskreq = HTTP::Request->new( GET => $statuscheckurl.$taskid);
-	$taskreq->header(ClientId => $clientid);
+	$taskreq->header(ClientId => $clientID);
 	my $taskres = $ua->request($taskreq);
 
-	my ($errorcode) = $taskres->decoded_content =~ m/.*errorCode":"?(.*?)"?,.*/g;
+	my $taskreturn = parseOutput($taskres);
+	return $taskreturn;
+}
 
-	if ($errorcode =~ /null/i){
-		return (0, "Status: Import successful");
+sub parseOutput {
+	my $response = shift;
+	my %responsedata;
+
+	$responsedata{'HTTPCode'} = $response->code;
+
+	$responsedata{'HTTPMessage'} = $response->message;
+	$responsedata{'Content'} = $response->decoded_content;
+
+	if ($responsedata{'HTTPCode'} != 200){
+		$responsedata{errormsg} .= "HTTP Response: Invalid\n";
 	}
-	else {
-		my ($errorcause) = $taskres->decoded_content =~ m/.*errorCause":"(.*?)".*/g;
-		my ($taskprogress) = $taskres->decoded_content =~ m/.*taskProgress":(.*?),.*/g;
-		my ($taskstate) = $taskres->decoded_content =~ m/.*taskState":"(.*?)".*/g;
-		my $returnstat = "Status: $taskstate\nCode: $errorcode\nCause: $errorcause";
-		return (1, $returnstat);
+
+	if ($responsedata{'Content'} =~ /taskId/){
+		($responsedata{'taskId'}) = $response->decoded_content =~ m/.*taskId":"(.*?)".*/g;
 	}
+
+	if ($responsedata{'Content'} =~ /errorCode/){
+		($responsedata{'errorCode'}) = $response->decoded_content =~ m/.*errorCode":"?(.*?)"?,.*/g;
+		if ($responsedata{'errorCode'} !~ /null/i){
+			$responsedata{errormsg} .= "Code: $responsedata{'errorCode'}\n";
+		}
+	}
+
+	if ($responsedata{'Content'} =~ /errorCause/){
+		($responsedata{'errorCause'}) = $response->decoded_content =~ m/.*errorCause":"(.*?)".*/g;
+		$responsedata{errormsg} .= "Cause: $responsedata{'errorCause'}\n";
+	}
+
+	if ($responsedata{'Content'} =~ /taskProgress/){
+		($responsedata{'taskProgress'}) = $response->decoded_content =~ m/.*taskProgress":(.*?),.*/g;
+		$responsedata{errormsg} .= "Progress: $responsedata{'taskProgress'}\n";
+	}
+
+	if ($responsedata{'Content'} =~ /taskState/){
+		($responsedata{'taskState'}) = $response->decoded_content =~ m/.*taskState":"(.*?)".*/g;
+		$responsedata{errormsg} .= "App Status: $responsedata{'taskState'}\n";
+	}
+
+	if ($responsedata{'Content'} =~ /clientId/){
+		($responsedata{'clientId'}) = $response->decoded_content =~ m/.*clientId":"(.*?)".*/g;
+	}
+
+	if ($responsedata{'Content'} =~ /completed/){
+		($responsedata{'completed'}) = $response->decoded_content =~ m/.*completed":"?(.*?)"?,.*/g;
+	}
+
+	return \%responsedata;
 }
