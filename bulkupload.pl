@@ -6,7 +6,6 @@ use File::Basename;
 use Getopt::Std;
 use File::Copy;
 
-use Data::Dumper;
 ####
 #
 # BMC Software
