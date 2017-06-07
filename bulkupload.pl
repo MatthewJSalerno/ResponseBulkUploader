@@ -57,8 +57,8 @@ my %severities = (
 
 # Define Auth modes
 my %auth = (
-	sccm => q|{"authenticationMethod":"SRP", "username": "##USERNAME##", "password":"##PASSWORD##"}|,
-	bsa =>  q|{"authenticationMethod":"SRP", "username": "##USERNAME##", "password":"##PASSWORD##"}|
+	sccm => q|{"authenticationMethod":"SRP", "username": "##USERNAME##.##ENGINE##", "password":"##PASSWORD##"}|,
+	bsa =>  q|{"authenticationMethod":"SRP", "username": "##USERNAME##.##ENGINE##", "password":"##PASSWORD##"}|
 );
 
 # Declare the perl command line options
@@ -142,6 +142,7 @@ if (!@scanfiles){
 # Build the auth string
 (my $loginstr = $auth{lc($options{a})}) =~ s/##USERNAME##/$options{u}/g;
 $loginstr =~ s/##PASSWORD##/$options{p}/g;
+$loginstr =~ s/##ENGINE##/\L$options{a}/g;
 
 ####
 #
