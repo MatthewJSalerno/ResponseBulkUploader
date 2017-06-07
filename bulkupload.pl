@@ -57,22 +57,23 @@ my %severities = (
 
 # Define Auth modes
 my %auth = (
-	sccm => q|{"authenticationMethod":"SRP", "username": "##USERNAME##.##ENGINE##", "password":"##PASSWORD##"}|,
-	bsa =>  q|{"authenticationMethod":"SRP", "username": "##USERNAME##.##ENGINE##", "password":"##PASSWORD##"}|
+	sccm => q|{"authenticationMethod":"SRP", "username": "##USERNAME##", "password":"##PASSWORD##"}|,
+	bsa =>  q|{"authenticationMethod":"SRP", "username": "##USERNAME##", "password":"##PASSWORD##"}|
 );
 
 # Declare the perl command line options
 my %options=();
-getopts("u:p:v:s:d:a:", \%options);
+getopts("u:p:v:s:d:a:n:", \%options);
 
 # Declare the required options
-my @required = qw(u p v d a);
+my @required = qw(u p v d a n);
 
 my $help = q|
 Required Options:
 -a     Auth mode (BSA,SCCM)
 -u     Username
 -p     Password
+-n     Domain name
 -v     Scan Vendor (Qualys,Rapid7,Nessus)
 -d     Scan file directory path
 -s     Comma-separated list of Severities to import (default: 3,4,5)
@@ -102,6 +103,9 @@ if (!exists $auth{lc($options{a})}){
         print "Invalid Auth method specified: $options{a}\n";
         exit;
 }
+
+# Remove "." from domain name
+$options{n} =~ s/\.//g;
 
 # Check severity
 my $importsev;
@@ -140,9 +144,10 @@ if (!@scanfiles){
 }
 
 # Build the auth string
-(my $loginstr = $auth{lc($options{a})}) =~ s/##USERNAME##/$options{u}/g;
+my $fullauthusername = $options{u}.'@'.$options{n}.'.'.lc($options{a});
+
+(my $loginstr = $auth{lc($options{a})}) =~ s/##USERNAME##/$fullauthusername/g;
 $loginstr =~ s/##PASSWORD##/$options{p}/g;
-$loginstr =~ s/##ENGINE##/\L$options{a}/g;
 
 ####
 #
