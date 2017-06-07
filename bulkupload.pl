@@ -34,9 +34,6 @@ my $loginurl = 'https://secure.secops.bmc.com/dcaportal/api/login';
 my $scanuploadurl = 'https://secure.secops.bmc.com/dcaportal/api/vulnerability/importScan';
 my $statuscheckurl = 'https://secure.secops.bmc.com/dcaportal/api/bsmsearch/results?taskId=';
 
-
-my @failedtasks;
-
 my %runningtasks; # Used for long running tasks
 
 # Associate scan file extension with scanner
@@ -173,7 +170,7 @@ foreach my $file (@scanfiles){
 
 	if (exists $$uploadreturn{'errormsg'}){
 		print "$file: HTTP Status: $$uploadreturn{'HTTPCode'} $$uploadreturn{'HTTPMessage'}\n";
-		print "$file: $$loginreturn{'errormsg'}\n";
+		print "$file: $$loginreturn{'errormsg'}";
 		exit 1;
 	}
 
@@ -181,20 +178,37 @@ foreach my $file (@scanfiles){
 		sleep 1;
 		my $taskreturn = checktask($ua,$$loginreturn{'clientId'},$statuscheckurl,$$uploadreturn{'taskId'});	
 
-		if ($$taskreturn{'completed'} =~ /false/i && $$taskreturn{'taskProgress'} != 100.0){
-			print "$file: Task still processing - Putting in queue and not moving file for now\n";
-			$runningtasks{$$uploadreturn{'taskId'}} = $file;
-			next;
+		if ( $$taskreturn{'completed'} =~ /false/i ){
+			if (!defined $$taskreturn{'taskProgress'}){
+				print "$file: Task still processing - Putting in queue and not moving file for now\n";
+				$runningtasks{$$uploadreturn{'taskId'}} = $file;
+				next;
+			}
+			elsif ( $$taskreturn{'taskProgress'} != 100.0 ){
+				print "$file: Task still processing - Putting in queue and not moving file for now\n";
+				$runningtasks{$$uploadreturn{'taskId'}} = $file;
+				next;
+			}
 		}
 		if (exists $$taskreturn{'errormsg'}){
 			$$taskreturn{'errormsg'} =~ s|^|$file: |mg;
 			print "$file: HTTP Status: $$taskreturn{'HTTPCode'} $$taskreturn{'HTTPMessage'}\n";
-			print "$$taskreturn{'errormsg'}\n";
+			print "$$taskreturn{'errormsg'}";
 		}
+
 		my $movestatus = movefile($file,$options{d},$$taskreturn{'errorCode'});
 		print "$file: $movestatus\n";
 	}
 }
+
+# Process Long running tasks
+
+foreach my $task (keys %runningtasks){
+	print "\nFiles to be checked\n";
+	print "\tTaskID: $task\tfile: $runningtasks{$task}\n";
+
+}
+
 exit 0;
 
 sub movefile {
@@ -217,7 +231,6 @@ sub movefile {
 		}
 	}
 	else {
-		#push (@failedtasks, $$uploadreturn{'taskId'}); # Should we maybe check these one more time before declaring it a failure?
 		if (-f "$path/failed/$file"){
 			my $epoch = time;
 			move($fullfilepath,"$options{d}/failed/$file-$epoch") or return "$file: ERROR: Move failed: $!";
@@ -358,6 +371,7 @@ sub parseOutput {
 
 	if ($responsedata{'Content'} =~ /completed/){
 		($responsedata{'completed'}) = $response->decoded_content =~ m/.*completed":"?(.*?)"?,.*/g;
+		$responsedata{errormsg} .= "Completed: $responsedata{'completed'}\n";
 	}
 
 	return \%responsedata;
