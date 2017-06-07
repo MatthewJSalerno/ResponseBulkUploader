@@ -158,7 +158,6 @@ $ua->cookie_jar( {} );
 # Authenticate
 my ($loginreturn) = login($ua, $loginurl, $loginstr);
 if (exists $$loginreturn{'errormsg'}){
-	print "HTTP Status: $$loginreturn{'HTTPCode'} $$loginreturn{'HTTPMessage'}\n";
 	print "$$loginreturn{'errormsg'}\n";
 	exit 1;
 }
@@ -169,8 +168,8 @@ foreach my $file (@scanfiles){
 	my ($uploadreturn) = uploadscan($ua, $$loginreturn{'clientId'}, $scanuploadurl, $fullfilepath,$importsev,$scanvendor);
 
 	if (exists $$uploadreturn{'errormsg'}){
-		print "$file: HTTP Status: $$uploadreturn{'HTTPCode'} $$uploadreturn{'HTTPMessage'}\n";
-		print "$file: $$loginreturn{'errormsg'}";
+		$$uploadreturn{'errormsg'} =~ s|^|$file: |mg;
+		print "$$uploadreturn{'errormsg'}";
 		exit 1;
 	}
 
@@ -192,7 +191,6 @@ foreach my $file (@scanfiles){
 		}
 		if (exists $$taskreturn{'errormsg'}){
 			$$taskreturn{'errormsg'} =~ s|^|$file: |mg;
-			print "$file: HTTP Status: $$taskreturn{'HTTPCode'} $$taskreturn{'HTTPMessage'}\n";
 			print "$$taskreturn{'errormsg'}";
 		}
 
@@ -346,6 +344,8 @@ sub parseOutput {
 	if ($responsedata{'Content'} =~ /errorCode/){
 		($responsedata{'errorCode'}) = $response->decoded_content =~ m/.*errorCode":"?(.*?)"?,.*/g;
 		if ($responsedata{'errorCode'} !~ /null/i){
+			$responsedata{errormsg} .= "HTTP Status: $responsedata{'HTTPCode'}\n";
+			$responsedata{errormsg} .= "HTTP Message: $responsedata{'HTTPMessage'}\n";
 			$responsedata{errormsg} .= "Code: $responsedata{'errorCode'}\n";
 		}
 	}
